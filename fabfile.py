@@ -37,7 +37,7 @@ g
 w
 Y
 EOF""")
-  # set boot flag
+  # set boot flag, change partition types to linux
   sudo("""fdisk /tmp/coreos.bin <<EOF
 a
 1
