@@ -52,7 +52,9 @@ EOF""")
 
 def setup_grub():
   sudo('mkdir -p /mnt/stateful')
-  sudo('mount -o loop,offset=1444938240 /tmp/coreos.bin /mnt/stateful')
+  offset = run('fdisk -l -u /tmp/coreos.bin|grep bin1|awk \'{print $3}\'')
+  offset = int(offset)*512
+  sudo('mount -o loop,offset=%s /tmp/coreos.bin /mnt/stateful' % (offset))
   sudo('mkdir -p /mnt/stateful/boot/grub')
   put('files/boot/grub/menu.lst', '/mnt/stateful/boot/grub/menu.lst', use_sudo=True)
   sudo('umount /mnt/stateful')
