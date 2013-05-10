@@ -3,4 +3,4 @@ timeout         0
 
 title           CoreOS
 root		(hd0,2)
-kernel          /boot/vmlinuz init=/sbin/init console=tty0 boot=local rootwait ro noresume noswap noinitrd i915.modeset=1 cros_efi root=/dev/sda3
+kernel          /boot/vmlinuz init=/sbin/init console=tty0 boot=local rootwait ro noresume noswap noinitrd i915.modeset=1 cros_efi root=/dev/xvda3
