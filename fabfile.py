@@ -8,6 +8,7 @@ from config import config
 import time
 #env.password = config['host_pass']
 env.user = 'ubuntu'
+env.key_filename = 'dist/key.pem'
 
 def setup_host():
   sudo('echo deb http://us-east-1.ec2.archive.ubuntu.com/ubuntu/ precise multiverse >> /etc/apt/sources.list')
@@ -15,12 +16,8 @@ def setup_host():
   sudo('apt-get update')
   sudo('apt-get -y install ec2-api-tools ec2-ami-tools gdisk')
 
-def run_all(name):
-  node = create_node(name,ami_id='ami-3fec7956') # ubuntu 12.04 x86_64
-
-  # fabric stuff
-  _set_hosts_by_node(node)
-
+def run_all():
+  _set_or_create_build_host()
   execute(setup_host)
 
 def build_ami(image_loc, ebs=None):
@@ -42,20 +39,20 @@ def burn_image():
   # convert to MBR
   sudo("""gdisk /tmp/coreos.bin <<EOF
 r
-g
+h
+1
+N
+EF
+Y
+N
 w
 Y
 EOF""")
   # set boot flag, change partition types to linux
   sudo("""fdisk /tmp/coreos.bin <<EOF
-a
-1
 t
 1
-83
-t
-3
-83
+e
 w
 EOF""")
 
@@ -74,7 +71,9 @@ def make_ami(img='coreos.bin'):
   put(config['aws_cert'], '/tmp/aws-cert.pem')
   run('ec2-bundle-image -k /tmp/aws-pk.pem -c /tmp/aws-cert.pem -u %s -i /tmp/%s -r x86_64 --kernel aki-b4aa75dd' % (config['aws_user_id'], img))
   run('ec2-upload-bundle -b coreos-images -m /tmp/%s.manifest.xml -a %s -s %s' % (img, config['aws_access_key'], config['aws_secret_key']))
-  run('ec2-register coreos-images/%s.manifest.xml -K %s -C %s' % (img, '/tmp/aws-pk.pem', '/tmp/aws-cert.pem'))
+  out = run('ec2-register coreos-images/%s.manifest.xml -K %s -C %s --root-device-name=/dev/sda' % (img, '/tmp/aws-pk.pem', '/tmp/aws-cert.pem'))
+  ami = out.split('\t')[1]
+  create_and_console(ami)
 
 def make_ami_from_snap(snap):
   put(config['aws_pk'], '/tmp/aws-pk.pem')
@@ -112,18 +111,33 @@ def _set_hosts_by_node(node):
     except socket.error:
       pass
 
+def _set_or_create_build_host():
+  driver = _get_aws_driver()
+  name = 'build-host'
+  nodes = [x for x in driver.list_nodes() if x.name == name]
+  if not nodes:
+    create_build_host()
+    nodes = [x for x in driver.list_nodes() if x.name == name]
+  _set_hosts_by_node(nodes[0])
+
 def _set_hosts_by_name(name):
   driver = _get_aws_driver()
   nodes = [x for x in driver.list_nodes() if x.name == name]
   _set_hosts_by_node(nodes[0])
 
+def create_build_host(size='m1.small', ami='ami-3fec7956'):
+  driver = _get_aws_driver()
+  node = create_node(name='build-host', ami_id='ami-3fec7956', keyname='coreos-test', size=size)
+  print node
+
+
 # libcloud specific functions
-def create_node(name, ami_id):
+def create_node(name, ami_id, keyname='coreos-test', security_group='quicklaunch-1', size='m1.small'):
   driver = _get_aws_driver()
   image = driver.list_images(ex_image_ids=[ami_id])[0]
   sizes = driver.list_sizes()
-  size = [s for s in sizes if s.id == 'm1.small'][0]
-  node = driver.create_node(name=name, size=size, image=image)
+  size = [s for s in sizes if s.id == size][0]
+  node = driver.create_node(name=name, size=size, image=image, ex_keyname=keyname, ex_securitygroup=security_group)
   nodes = driver.wait_until_running(nodes=[node])
   return nodes[0][0]
 
@@ -136,7 +150,7 @@ def show_node(name):
 
 def destroy_node(name):
   driver = _get_aws_driver()
-  nodes = [x for x in driver.list_nodes() if x.name == name]
+  nodes = [x for x in driver.list_nodes() if x.name == name and x.state == 0]
   if len(nodes) != 1:
     raise 'Node %s not found' % (name)
   node = nodes[0]
@@ -172,6 +186,34 @@ def make_zero_parted_img():
   sudo('mkdir -p /mnt/zero/boot/grub')
   #put('files/boot/vmlinuz', '/mnt/zero/boot/vmlinuz', use_sudo=True)
   put('files/boot/grub/menu.lst', '/mnt/zero/boot/grub/menu.lst', use_sudo=True)
+  cleanup_zero_parted_img()
+
+def make_zero_parted_hybrid_img():
+  run('dd if=/dev/zero of=/tmp/zero-parted.img bs=1 count=0 seek=256M')
+  sudo('losetup /dev/loop0 /tmp/zero-parted.img')
+  sudo('parted -s /dev/loop0 mklabel gpt')
+  sudo('parted -s /dev/loop0 unit cyl mkpart primary fat32 -- 0 -2')
+  sudo('parted -s /dev/loop0 toggle 1 boot')
+  sudo('mkfs.vfat -I /dev/loop0p1')
+  #sudo('mkfs.ext4 /dev/loop0p1')
+  sudo('mkdir -p /mnt/zero')
+  sudo('mount /dev/loop0p1 /mnt/zero')
+  sudo('mkdir -p /mnt/zero/boot/grub')
+  #put('files/boot/vmlinuz', '/mnt/zero/boot/vmlinuz', use_sudo=True)
+  put('files/boot/grub/menu.lst', '/mnt/zero/boot/grub/menu.lst', use_sudo=True)
+  cleanup_zero_parted_img()
+  sudo("""gdisk /tmp/zero-parted.img <<EOF
+r
+h
+1
+N
+EF
+Y
+N
+w
+Y
+EOF""")
+  # fdisk to change thing: t 1 e w
 
 def cleanup_zero_parted_img():
   sudo('umount /mnt/zero')
