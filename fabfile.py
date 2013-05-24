@@ -15,15 +15,18 @@ def setup_host():
   sudo('echo deb http://us-east-1.ec2.archive.ubuntu.com/ubuntu/ precise-updates multiverse >> /etc/apt/sources.list')
   sudo('apt-get update')
   sudo('apt-get -y install ec2-api-tools ec2-ami-tools gdisk')
+  put(config['aws_pk'], '/tmp/aws-pk.pem')
+  put(config['aws_cert'], '/tmp/aws-cert.pem')
 
-def run_all():
+def run_all(image_loc):
   _set_or_create_build_host()
   execute(setup_host)
+  #execute(build_ami, image_loc)
 
 def build_ami(image_loc, ebs=None):
   fetch_image(image_loc)
   #setup_grub()
-  burn_image(ebs)
+  burn_image()
   make_ami()
 
 def copy_image(image_loc):
@@ -36,24 +39,17 @@ def burn_to_ebs(ebs):
   sudo('dd if=/tmp/coreos.bin of=%s bs=128M' % (ebs))
 
 def burn_image():
-  # convert to MBR
+  # convert to hybrid MBR
   sudo("""gdisk /tmp/coreos.bin <<EOF
 r
 h
 1
 N
-EF
+c
 Y
 N
 w
 Y
-EOF""")
-  # set boot flag, change partition types to linux
-  sudo("""fdisk /tmp/coreos.bin <<EOF
-t
-1
-e
-w
 EOF""")
 
 def setup_grub():
@@ -67,17 +63,34 @@ def setup_grub():
   sudo('rm -r /mnt/stateful')
 
 def make_ami(img='coreos.bin'):
-  put(config['aws_pk'], '/tmp/aws-pk.pem')
-  put(config['aws_cert'], '/tmp/aws-cert.pem')
   run('ec2-bundle-image -k /tmp/aws-pk.pem -c /tmp/aws-cert.pem -u %s -i /tmp/%s -r x86_64 --kernel aki-b4aa75dd' % (config['aws_user_id'], img))
   run('ec2-upload-bundle -b coreos-images -m /tmp/%s.manifest.xml -a %s -s %s' % (img, config['aws_access_key'], config['aws_secret_key']))
   out = run('ec2-register coreos-images/%s.manifest.xml -K %s -C %s --root-device-name=/dev/sda' % (img, '/tmp/aws-pk.pem', '/tmp/aws-cert.pem'))
   ami = out.split('\t')[1]
   create_and_console(ami)
 
+def make_ebs_ami(img):
+  build_node = _set_or_create_build_host()
+#  execute(fetch_image, img)
+  execute(burn_image)
+  execute(create_golden_volume, build_node.id)
+
+def create_golden_volume(instance_id, size='7', zone='us-east-1a'):
+  out = run('ec2-create-volume -K /tmp/aws-pk.pem -C /tmp/aws-cert.pem -s %s -z %s' % (size, zone))
+  vol = out.split('\t')[1]
+  device = '/dev/xvdf'
+  out = run('ec2-attach-volume %s -K /tmp/aws-pk.pem -C /tmp/aws-cert.pem -i %s -d %s' % (vol, instance_id, device))
+  sudo('dd if=/tmp/coreos.bin of=%s bs=128M' % (device))
+  out = run('ec2-create-snapshot -K /tmp/aws-pk.pem -C /tmp/aws-cert.pem %s' % (vol))
+  snap = out.split('\t')[1]
+  time.sleep(240) # wait for it to complete
+  run('ec2-register -b "/dev/sda=%s::false" -b "/dev/sdb=ephemeral0" -n "CoreOS %s" -d "CoreOS latest" -a x86_64 --kernel aki-b4aa75dd -K %s -C %s' % (snap, int(time.time()), '/tmp/aws-pk.pem', '/tmp/aws-cert.pem'))
+  out = run('ec2-detach-volume %s -K /tmp/aws-pk.pem -C /tmp/aws-cert.pem -i %s -d %s' % (vol, instance_id, device))
+  out = run('ec2-delete-volume -K /tmp/aws-pk.pem -C /tmp/aws-cert.pem %s' % (vol))
+
+
+
 def make_ami_from_snap(snap):
-  put(config['aws_pk'], '/tmp/aws-pk.pem')
-  put(config['aws_cert'], '/tmp/aws-cert.pem')
   run('ec2-register -b "/dev/sda=%s::false" -b "/dev/sdb=ephemeral0" -n "CoreOS %s" -d "CoreOS latest" -a x86_64 --kernel aki-b4aa75dd -K %s -C %s' % (snap, int(time.time()), '/tmp/aws-pk.pem', '/tmp/aws-cert.pem'))
 
 # grabs the console data from the EC2 api
@@ -119,6 +132,7 @@ def _set_or_create_build_host():
     create_build_host()
     nodes = [x for x in driver.list_nodes() if x.name == name]
   _set_hosts_by_node(nodes[0])
+  return nodes[0]
 
 def _set_hosts_by_name(name):
   driver = _get_aws_driver()
@@ -219,3 +233,7 @@ def cleanup_zero_parted_img():
   sudo('umount /mnt/zero')
   sudo('rm -r /mnt/zero')
   sudo('losetup -d /dev/loop0')
+
+
+def create_coreos_node(name):
+  create_node(name, 'ami-af98f6c6')
